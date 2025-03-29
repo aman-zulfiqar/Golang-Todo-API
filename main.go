@@ -12,100 +12,128 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/thedevsaddam/renderer"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 var rnd *renderer.Render
-var todos = []todo{}
+var client *mongo.Client
+var todoCollection *mongo.Collection
 
 const port string = ":9010"
 
-type (
-	todo struct {
-		ID        string    `json:"id"`
-		Title     string    `json:"title"`
-		Completed bool      `json:"completed"`
-		CreatedAt time.Time `json:"created_at"`
-	}
-)
+// Todo struct
+type todo struct {
+	ID        primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	Title     string             `json:"title" bson:"title"`
+	Completed bool               `json:"completed" bson:"completed"`
+	CreatedAt time.Time          `json:"created_at" bson:"created_at"`
+}
 
 func init() {
 	rnd = renderer.New()
+
+	// Connect to MongoDB
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var err error
+	client, err = mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	checkErr(err, "Error connecting to MongoDB")
+	todoCollection = client.Database("tododb").Collection("todos")
 }
 
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	err := rnd.Template(w, http.StatusOK, []string{"templete/home.tpl"}, nil)
-	checkErr(err)
+	checkErr(err, "Failed")
 }
 
 func createTodo(w http.ResponseWriter, r *http.Request) {
 	var t todo
-
-	// Decode the JSON request body
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 		rnd.JSON(w, http.StatusBadRequest, renderer.M{"error": "Invalid request"})
 		return
 	}
 
-	// Validate that the title is not empty
 	if t.Title == "" {
 		rnd.JSON(w, http.StatusBadRequest, renderer.M{"message": "The title field is required"})
 		return
 	}
 
-	// Generate a unique ID and timestamp for the new Todo
-	t.ID = time.Now().Format("20060102150405")
 	t.CreatedAt = time.Now()
-	todos = append(todos, t)
+	res, err := todoCollection.InsertOne(context.TODO(), t)
+	if checkErr(err, "Failed to create todo") {
+		return
+	}
 
-	rnd.JSON(w, http.StatusCreated, renderer.M{
-		"message": "Todo created successfully",
-		"todo_id": t.ID,
-	})
+	rnd.JSON(w, http.StatusCreated, renderer.M{"message": "Todo created successfully", "todo_id": res.InsertedID})
+}
+
+func fetchTodos(w http.ResponseWriter, r *http.Request) {
+	cursor, err := todoCollection.Find(context.TODO(), bson.M{})
+	if checkErr(err, "Failed to fetch todos") {
+		return
+	}
+	defer cursor.Close(context.TODO())
+
+	var todos []todo
+	if checkErr(cursor.All(context.TODO(), &todos), "Failed to parse todos") {
+		return
+	}
+
+	rnd.JSON(w, http.StatusOK, renderer.M{"data": todos})
 }
 
 func updateTodo(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := strings.TrimSpace(vars["id"])
-	var t todo
+	objID, err := primitive.ObjectIDFromHex(id)
+	if checkErr(err, "Invalid ID") {
+		rnd.JSON(w, http.StatusBadRequest, renderer.M{"error": "Invalid ID"})
+		return
+	}
 
-	// Decode the JSON request body
-	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+	var t todo
+	if checkErr(json.NewDecoder(r.Body).Decode(&t), "Invalid request") {
 		rnd.JSON(w, http.StatusBadRequest, renderer.M{"error": "Invalid request"})
 		return
 	}
 
-	// Find and update the Todo item
-	for i, item := range todos {
-		if item.ID == id {
-			todos[i].Title = t.Title
-			todos[i].Completed = t.Completed
-			rnd.JSON(w, http.StatusOK, renderer.M{"message": "Todo updated successfully"})
-			return
-		}
+	update := bson.M{"$set": bson.M{"title": t.Title, "completed": t.Completed}}
+	res, err := todoCollection.UpdateOne(context.TODO(), bson.M{"_id": objID}, update)
+	if checkErr(err, "Failed to update todo") || res.MatchedCount == 0 {
+		rnd.JSON(w, http.StatusNotFound, renderer.M{"message": "Todo not found"})
+		return
 	}
 
-	rnd.JSON(w, http.StatusNotFound, renderer.M{"message": "Todo not found"})
-}
-
-// Fetches and returns all Todo items
-func fetchTodos(w http.ResponseWriter, r *http.Request) {
-	rnd.JSON(w, http.StatusOK, renderer.M{"data": todos})
+	rnd.JSON(w, http.StatusOK, renderer.M{"message": "Todo updated successfully"})
 }
 
 func deleteTodo(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := strings.TrimSpace(vars["id"])
-
-	// Find and remove the Todo item
-	for i, item := range todos {
-		if item.ID == id {
-			todos = append(todos[:i], todos[i+1:]...)
-			rnd.JSON(w, http.StatusOK, renderer.M{"message": "Todo deleted successfully"})
-			return
-		}
+	objID, err := primitive.ObjectIDFromHex(id)
+	if checkErr(err, "Invalid ID") {
+		rnd.JSON(w, http.StatusBadRequest, renderer.M{"error": "Invalid ID"})
+		return
 	}
 
-	rnd.JSON(w, http.StatusNotFound, renderer.M{"message": "Todo not found"})
+	res, err := todoCollection.DeleteOne(context.TODO(), bson.M{"_id": objID})
+	if checkErr(err, "Failed to delete todo") || res.DeletedCount == 0 {
+		rnd.JSON(w, http.StatusNotFound, renderer.M{"message": "Todo not found"})
+		return
+	}
+
+	rnd.JSON(w, http.StatusOK, renderer.M{"message": "Todo deleted successfully"})
+}
+
+func checkErr(err error, msg string) bool {
+	if err != nil {
+		log.Println(msg, ":", err)
+		return true
+	}
+	return false
 }
 
 func main() {
@@ -138,14 +166,8 @@ func main() {
 	log.Println("Shutting down server...")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("Server shutdown error: %s\n", err)
+	if checkErr(srv.Shutdown(ctx), "Server shutdown error") {
+		return
 	}
 	log.Println("Server gracefully stopped!")
-}
-
-func checkErr(err error) {
-	if err != nil {
-		log.Fatal(err) //respond with error page or message
-	}
 }
