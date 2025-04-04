@@ -29,5 +29,3 @@ volumes:
 
 
   #To run this put "docker compose -f mongodb.yaml up -d"
-
-
