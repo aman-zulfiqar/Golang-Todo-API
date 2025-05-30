@@ -16,6 +16,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+
+
 var rnd *renderer.Render
 var client *mongo.Client
 var todoCollection *mongo.Collection
